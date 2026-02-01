@@ -117,38 +117,22 @@ export async function syncHolders(opts: {
 
       let maxLT: null | number = null;
       for (const { transaction, dex } of transactionsData) {
-        if (dbHolder === undefined) {
-          if (!firstSync) {
-            await broadcastNotification({
-              telegraf,
-              configs,
-              configDao,
-              address: holder,
-              tokenInfo,
-              isNewHolder: true,
-              tickerValue,
-              transaction,
-              dex,
-            });
-          }
-        } else if (BigInt(transaction.amount) > 0) {
-          if (!firstSync) {
-            await broadcastNotification({
-              telegraf,
-              configs,
-              configDao,
-              address: holder,
-              tokenInfo,
-              isNewHolder: false,
-              tickerValue,
-              transaction,
-              dex,
-            });
-          }
+        const isNewHolder = dbHolder === undefined;
+        const isTopUp = BigInt(transaction.amount) > 0n;
+        if (!firstSync && (isNewHolder || isTopUp)) {
+          await broadcastNotification({
+            telegraf,
+            configs,
+            tokenAddress: tokenInfo.address,
+            transaction,
+            buyer: holder,
+            tokenInfo,
+            holdersCount: tokenInfo.holders_count ?? null,
+            dexName: dex,
+          });
         }
-        if (maxLT === null || transaction.lt > maxLT) {
-          maxLT = transaction.lt;
-        }
+
+        maxLT = maxLT !== null ? Math.max(transaction.lt, maxLT) : transaction.lt;
       }
       await holderDao.findOrUpdateHolder(
         tokenAddress,
