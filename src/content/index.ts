@@ -40,16 +40,15 @@ export function getNotification(data: NotificationData) {
 
   const spentSubstring =
     tickerValueFloat === null
-      ? ""
+      ? null
       : fiatFormat.format(tickerValueFloat * tokenBalance);
-  const marketcapSubstring = `${
+  const marketcapSubstring =
     tickerValueFloat === null
-      ? ""
+      ? "N/A"
       : fiatFormat.format(
           parseFloat(fromNano(BigInt(tokenInfo.total_supply))) *
             tickerValueFloat,
-        )
-  }`;
+        );
 
   const balanceSubstring = `${cryptoFormat.format(tokenBalance)} ${symbol}`;
 
@@ -61,7 +60,7 @@ export function getNotification(data: NotificationData) {
 
     ${emoji ?? "🦆"}
     
-    🧳Bought: ${balanceSubstring} (${spentSubstring}) via [${dexName}](https://tonviewer.com/transaction/${transactionId})
+    🧳Bought: ${balanceSubstring}${spentSubstring ? ` (${spentSubstring})` : ""} via [${dexName}](https://tonviewer.com/transaction/${transactionId})
     ${isNewHolder ? "\n👋New Holder! Welcome!\n" : ""}
     📊Market cap: ${marketcapSubstring}
     💸Check buyers [wallet](https://tonviewer.com/${address.address})
