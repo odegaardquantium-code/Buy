@@ -11,12 +11,20 @@ async function main() {
   logger.info("Starting app...");
   await AppDataSource.initialize();
   logger.info("Data Source has been initialized!");
-  if (process.env.EXEC_MODE === "bot") {
-    await initBot();
-  }
-  if (process.env.EXEC_MODE === "cron") {
+
+  // IMPORTANT:
+  // If EXEC_MODE is not set, we default to running the Telegram bot.
+  // Otherwise the app will start, initialize the DB, then exit (so the bot
+  // will never answer /start).
+  const mode = (process.env.EXEC_MODE || "bot").toLowerCase();
+
+  if (mode === "cron") {
     await initCron();
+    return;
   }
+
+  // Default = bot
+  await initBot();
 }
 
 main();
