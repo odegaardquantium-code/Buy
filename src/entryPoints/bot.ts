@@ -91,9 +91,8 @@ export async function initBot() {
           }
           if (dbTicker.conmarketcapId === null) {
             await ctx.reply(
-              `Got token ${tokenData.metadata.symbol} with ${tokenData.holders_count} holders. Though I can't find it on coinmarketcap. I'll try to find it later`,
+              `Got token ${tokenData.metadata.symbol} with ${tokenData.holders_count} holders.\nNot listed on CoinMarketCap yet — that's fine. I can still track buys; USD price/market cap may show as N/A until a price feed is available.`,
             );
-            return;
           }
           if (dbTicker.value === null) {
             const newTickerValue = await getTicker(dbTicker.conmarketcapId);
@@ -104,9 +103,8 @@ export async function initBot() {
           }
           if (dbTicker.value === null) {
             await ctx.reply(
-              `Got token ${tokenData.metadata.symbol} with ${tokenData.holders_count} holders. Though there is no ticker for it. I'll try to find it later`,
+              `Got token ${tokenData.metadata.symbol} with ${tokenData.holders_count} holders.\nPrice feed isn't available yet — tracking buys with TON amounts only.`,
             );
-            return;
           }
           const fiatCurrency = getFiatCurrency();
           const fiatFormat = new Intl.NumberFormat("en", {
@@ -114,13 +112,16 @@ export async function initBot() {
             currency: fiatCurrency,
           });
 
-          await ctx.reply(
-            `Got token ${tokenData.metadata.symbol} with ${
-              tokenData.holders_count
-            } holders\nPrice is ${fiatFormat.format(
-              parseFloat(dbTicker.value),
-            )}`,
-          );
+          // If we have a fiat price, show it. Otherwise we've already warned above.
+          if (dbTicker.value !== null) {
+            await ctx.reply(
+              `Got token ${tokenData.metadata.symbol} with ${
+                tokenData.holders_count
+              } holders\nPrice is ${fiatFormat.format(
+                parseFloat(dbTicker.value),
+              )}`,
+            );
+          }
         } catch (err) {
           await ctx.reply("Unable to get token info");
           return;
