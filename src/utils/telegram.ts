@@ -1,129 +1,102 @@
-import { inspect } from "util";
+import { JettonHolders, JettonInfo, Transaction } from "tonapi-sdk-js";
+import { config as dotenvConfig } from "dotenv";
 import { Telegraf } from "telegraf";
-import { JettonHolders, JettonInfo } from "tonapi-sdk-js";
 
-import { Config } from "../orm/entities/config";
 import { getNotification } from "../content";
-import logger from "./logger";
-import { ConfigDao } from "../orm/dao/configDao";
-import { JettonTransfer } from "./jetton";
-import { fromNano } from "@ton/core";
+import { Config } from "../orm/entities/config";
+import { getBookTrendingBotUrl, getDtradeReferralBase, getTrendingUrl, getDexConfig } from "./config";
+import { getDexMarketData, getTonUsd } from "./market";
 
-export async function broadcastNotification(opts: {
+dotenvConfig();
+
+export async function broadcastNotification({
+  telegraf,
+  configs,
+  address,
+  tokenInfo,
+  isNewHolder,
+  tickerValue,
+  transaction,
+  dex,
+  holdersCount,
+}: {
   telegraf: Telegraf;
   configs: Config[];
-  configDao: ConfigDao;
-  address: JettonHolders["addresses"][0];
+  address: JettonHolders;
   tokenInfo: JettonInfo;
-  tickerValue: string | null;
   isNewHolder: boolean;
-  transaction: JettonTransfer;
-  dex: string;
+  tickerValue: string | null;
+  transaction: Transaction;
+  dex?: string;
+  holdersCount?: number | null;
 }) {
-  const {
-    telegraf,
-    configs,
-    configDao,
-    address,
-    tokenInfo,
-    isNewHolder,
-    tickerValue,
-    transaction,
-    dex,
-  } = opts;
-  const amount = fromNano(transaction.amount);
-  for (const config of configs) {
-    // `config.value.minBuy` is persisted as `string | boolean | null`.
-    // Narrow it before calling `parseFloat` so `tsc --strict` passes.
-    const minBuyRaw = config.value.minBuy;
-    const minBuy = typeof minBuyRaw === "string" && minBuyRaw.trim() !== "" ? parseFloat(minBuyRaw) : 0;
-    const passesMinBuy = !Number.isFinite(minBuy) ? true : parseFloat(amount) > minBuy;
+  const tokenSymbol = tokenInfo.metadata.symbol ?? "TOKEN";
+  const tokenAddress = tokenInfo.metadata.address;
 
-    if (minBuyRaw === null || typeof minBuyRaw === "boolean" || passesMinBuy) {
-      logger.info(
-        `Broadcasting notification to ${config.chatId} (${amount} > ${config.value.minBuy})`,
-      );
-      const stillExists = await configDao.stillExists(config.chatId);
-      if (!stillExists) {
-        logger.warn(`Chat ${config.chatId} no longer exists, skipping`);
-        continue;
-      }
-      const content = getNotification({
-        address,
-        tokenInfo,
-        isNewHolder,
-        tickerValue,
-        // it will always be string, null or false. True is never going to happen, otherwise noone cares :D
-        emoji:
-          typeof config.value.emoji === "boolean" ? null : config.value.emoji,
-        tokenAmount: amount,
-        transactionId: transaction.id,
-        dex,
+  const [tonUsd, market] = await Promise.all([
+    getTonUsd(),
+    getDexMarketData(tokenAddress),
+  ]);
+
+  // We treat tickerValue as a fallback token USD price if we don't have DexScreener data.
+  const fallbackPriceUsd = tickerValue ? Number(tickerValue) : null;
+  const tokenPriceUsd = market.priceUsd ?? (Number.isFinite(fallbackPriceUsd) ? fallbackPriceUsd : null);
+
+  const dexDisplay = dex ? (getDexConfig().get(dex) ?? dex) : undefined;
+  const notificationText = getNotification({
+    tokenSymbol,
+    tokenAddress,
+    dexName: dexDisplay,
+    transactionId: transaction.hash,
+    buyerAddress: address.address,
+    jettonAmountNano: transaction.amount,
+    holdersCount: holdersCount ?? null,
+    tokenPriceUsd,
+    liquidityUsd: market.liquidityUsd ?? null,
+    marketCapUsd: market.marketCapUsd ?? null,
+    tonUsd,
+    telegramUrl: market.telegramUrl ?? null,
+    trendingUrl: getTrendingUrl(),
+  });
+
+  const bookTrendingUrl = getBookTrendingBotUrl();
+  const trendingUrl = getTrendingUrl();
+  const dtradeBase = getDtradeReferralBase();
+  const dtradeUrl = `${dtradeBase}_${tokenAddress}`;
+
+  const inlineKeyboard = {
+    inline_keyboard: [
+      [
+        { text: "🔥 Book Trending", url: bookTrendingUrl },
+        { text: "📈 Trending", url: trendingUrl },
+      ],
+      [{ text: "⚡️ Buy with DTrade", url: dtradeUrl }],
+    ],
+  };
+
+  for (const config of configs) {
+    try {
+      await telegraf.telegram.sendMessage(config.telegramChatId, notificationText, {
+        parse_mode: "Markdown",
+        reply_markup: inlineKeyboard,
+        disable_web_page_preview: true,
       });
-      try {
-        await sendNotification(telegraf, config, content);
-      } catch (e) {
-        logger.error(
-          `Error sending notification to ${config.chatId} ${inspect(e)}`,
-        );
-      }
+    } catch (err) {
+      console.error("Failed to send message to chat", config.telegramChatId, err);
     }
   }
-}
 
-export async function sendNotification(
-  telegraf: Telegraf,
-  config: Config,
-  content: string,
-): Promise<void> {
-  const inline_keyboard = [
-    [
-      {
-        text: "Buy with DeDust.io",
-        url: `https://dedust.io/swap/TON/${config.tokenAddress}`,
-      },
-      {
-        text: "Buy with STON.fi",
-        url: `https://app.ston.fi/swap?chartVisible=false&ft=TON&tt=${config.tokenAddress}`,
-      },
-    ],
-  ];
-  if (!config.value.gif && !config.value.photo) {
-    await telegraf.telegram.sendMessage(config.chatId, content, {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard,
-      },
-    });
-    return;
-  }
-
-  if (config.value.gif) {
-    await telegraf.telegram.sendAnimation(
-      config.chatId,
-      // @ts-expect-error message.animation is expected
-      config.value.gif,
-      {
+  // Optional: also send to a global trending channel chat id.
+  const trendingChatId = process.env.TRENDING_CHAT_ID;
+  if (trendingChatId) {
+    try {
+      await telegraf.telegram.sendMessage(trendingChatId, notificationText, {
         parse_mode: "Markdown",
-        caption: content,
-        reply_markup: {
-          inline_keyboard,
-        },
-      },
-    );
-  }
-  if (config.value.photo) {
-    await telegraf.telegram.sendPhoto(
-      config.chatId,
-      // @ts-expect-error message.photo is expected
-      config.value.photo,
-      {
-        parse_mode: "Markdown",
-        caption: content,
-        reply_markup: {
-          inline_keyboard,
-        },
-      },
-    );
+        reply_markup: inlineKeyboard,
+        disable_web_page_preview: true,
+      });
+    } catch (err) {
+      console.error("Failed to send message to TRENDING_CHAT_ID", err);
+    }
   }
 }

@@ -15,3 +15,16 @@ export function getDexConfig(): Map<string, string> {
   }
   return dexConfig;
 }
+
+export function getTrendingUrl(): string {
+  return process.env.TRENDING_URL ?? "https://t.me/SpyTonTrending";
+}
+
+export function getBookTrendingBotUrl(): string {
+  return process.env.BOOK_TRENDING_BOT_URL ?? "https://t.me/SpyTONTrndBot";
+}
+
+export function getDtradeReferralBase(): string {
+  // User provided default; can override in Railway Variables
+  return process.env.DTRADE_REFERRAL ?? "https://t.me/dtrade?start=11TYq7LInG";
+}
