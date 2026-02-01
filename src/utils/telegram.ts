@@ -33,13 +33,13 @@ export async function broadcastNotification(opts: {
   } = opts;
   const amount = fromNano(transaction.amount);
   for (const config of configs) {
-    if (
-      config.value.minBuy === null ||
-      // No matter in this case true or false :D
-      // This field is always null (no value yet), string (limit set) or boolean (false, no limit)
-      typeof config.value.minBuy === "boolean" ||
-      parseFloat(amount) > parseFloat(config.value.minBuy)
-    ) {
+    // `config.value.minBuy` is persisted as `string | boolean | null`.
+    // Narrow it before calling `parseFloat` so `tsc --strict` passes.
+    const minBuyRaw = config.value.minBuy;
+    const minBuy = typeof minBuyRaw === "string" && minBuyRaw.trim() !== "" ? parseFloat(minBuyRaw) : 0;
+    const passesMinBuy = !Number.isFinite(minBuy) ? true : parseFloat(amount) > minBuy;
+
+    if (minBuyRaw === null || typeof minBuyRaw === "boolean" || passesMinBuy) {
       logger.info(
         `Broadcasting notification to ${config.chatId} (${amount} > ${config.value.minBuy})`,
       );
