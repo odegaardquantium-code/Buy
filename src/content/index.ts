@@ -1,74 +1,78 @@
 import { fromNano } from "@ton/core";
-import { JettonHolders, JettonInfo } from "tonapi-sdk-js";
-import { getFiatCurrency } from "../utils/currency";
-import { getDexConfig } from "../utils/config";
 
-export interface NotificationData {
-  tokenInfo: JettonInfo;
-  address: JettonHolders["addresses"][0];
-  isNewHolder: boolean;
-  tickerValue: string | null;
-  emoji: string | null;
+export type NotificationArgs = {
+  tokenSymbol: string;
+  tokenAddress: string;
+  dexName?: string;
   transactionId: string;
-  tokenAmount: string;
-  dex: string;
+  buyerAddress: string;
+  jettonAmountNano: string;
+  holdersCount?: number | null;
+  tokenPriceUsd?: number | null;
+  liquidityUsd?: number | null;
+  marketCapUsd?: number | null;
+  tonUsd?: number | null;
+  telegramUrl?: string | null;
+  trendingUrl: string;
+  gtUrl: string;
+  dexScreenerUrl: string;
+  txUrl: string;
+};
+
+function shortAddr(addr: string): string {
+  if (!addr) return "";
+  if (addr.length <= 12) return addr;
+  return `${addr.slice(0, 4)}...${addr.slice(-4)}`;
 }
 
-export function getNotification(data: NotificationData) {
-  const {
-    tickerValue,
-    isNewHolder,
-    emoji,
-    address,
-    tokenInfo,
-    transactionId,
-    tokenAmount,
-    dex,
-  } = data;
-  const symbol = tokenInfo.metadata.symbol;
+function fmtUsd(v?: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  if (v >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (v >= 1) return v.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  return v.toLocaleString(undefined, { maximumFractionDigits: 8 });
+}
 
-  const tickerValueFloat = tickerValue ? parseFloat(tickerValue) : null;
+function fmtNum(v?: number | null): string {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+}
 
-  const fiatCurrency = getFiatCurrency();
-  const fiatFormat = new Intl.NumberFormat("en", {
-    style: "currency",
-    currency: fiatCurrency,
-  });
-  const cryptoFormat = new Intl.NumberFormat("en", { style: "decimal" });
+export function getNotification(args: NotificationArgs): string {
+  const jettonAmount = Number(fromNano(args.jettonAmountNano));
+  const priceUsd = args.tokenPriceUsd ?? null;
+  const usdValue = priceUsd ? jettonAmount * priceUsd : null;
+  const tonUsd = args.tonUsd ?? null;
+  const tonValue = usdValue && tonUsd ? usdValue / tonUsd : null;
 
-  const tokenBalance = Math.floor(parseFloat(tokenAmount));
+  const header = `${args.tokenSymbol} Buy! — ${args.dexName ?? "DEX"}`;
 
-  const spentSubstring =
-    tickerValueFloat === null
-      ? null
-      : fiatFormat.format(tickerValueFloat * tokenBalance);
-  const marketcapSubstring =
-    tickerValueFloat === null
-      ? "N/A"
-      : fiatFormat.format(
-          parseFloat(fromNano(BigInt(tokenInfo.total_supply))) *
-            tickerValueFloat,
-        );
+  const lines: string[] = [];
+  lines.push(header);
+  lines.push("");
 
-  const balanceSubstring = `${cryptoFormat.format(tokenBalance)} ${symbol}`;
+  if (tonValue !== null && usdValue !== null) {
+    lines.push(`💎 ${tonValue.toFixed(2)} TON ($${fmtUsd(usdValue)})`);
+  } else {
+    lines.push(`💎 — TON ($${usdValue !== null ? fmtUsd(usdValue) : "—"})`);
+  }
 
-  const dexConfig = getDexConfig();
-  const dexName = dexConfig.get(dex);
+  lines.push(`🪙 ${jettonAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${args.tokenSymbol}`);
+  lines.push(`👤 ${shortAddr(args.buyerAddress)}`);
+  lines.push("");
 
-  return (
-    `🚨 ${symbol} New Buy!🚨
+  lines.push(`Price: $${fmtUsd(args.tokenPriceUsd)}`);
+  lines.push(`Liquidity: $${fmtUsd(args.liquidityUsd)}`);
+  lines.push(`MCap: $${fmtUsd(args.marketCapUsd)}`);
+  lines.push(`Holders: ${fmtNum(args.holdersCount ?? null)}`);
+  lines.push("");
 
-    ${emoji ?? "🦆"}
-    
-    🧳Bought: ${balanceSubstring}${spentSubstring ? ` (${spentSubstring})` : ""} via [${dexName}](https://tonviewer.com/transaction/${transactionId})
-    ${isNewHolder ? "\n👋New Holder! Welcome!\n" : ""}
-    📊Market cap: ${marketcapSubstring}
-    💸Check buyers [wallet](https://tonviewer.com/${address.address})
-    👨${tokenInfo.holders_count} Holders`
-      .split("\n")
-      .map((line) => line.trim())
-      .join("\n")
-      // One empty like is ok
-      .replace("\n\n\n", "\n")
-  );
+  const parts: string[] = [];
+  parts.push(`[TX](${args.txUrl})`);
+  parts.push(`[GT](${args.gtUrl})`);
+  parts.push(`[DexS](${args.dexScreenerUrl})`);
+  if (args.telegramUrl) parts.push(`[Telegram](${args.telegramUrl})`);
+  parts.push(`[Trending](${args.trendingUrl})`);
+  lines.push(parts.join(" | "));
+
+  return lines.join("\n");
 }
