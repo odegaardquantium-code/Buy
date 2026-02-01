@@ -3,8 +3,6 @@ import { ConfigDao } from "../orm/dao/configDao";
 import { Address } from "@ton/core";
 import { HttpClient, Api } from "tonapi-sdk-js";
 import { TickerDao } from "../orm/dao/tickerDao";
-import { getTONTokenId, getTicker } from "../utils/coinmarketcap";
-import { getFiatCurrency } from "../utils/currency";
 import { waitTONRPSDelay } from "../utils/runtime";
 import logger from "../utils/logger";
 import { inspect } from "util";
@@ -82,156 +80,15 @@ export async function initBot() {
           config.tokenAddress = tokenAddress;
           await configDao.updateConfig(config);
 
-          const dbTicker = await tickerDao.getOrCreateTicker(tokenAddress);
-          if (dbTicker.conmarketcapId === null) {
-            dbTicker.conmarketcapId = await getTONTokenId(tokenAddress);
-            if (dbTicker.conmarketcapId !== null) {
-              await tickerDao.updateTicker(dbTicker);
-            }
-          }
-          if (dbTicker.conmarketcapId === null) {
-            await ctx.reply(
-              `Got token ${tokenData.metadata.symbol} with ${tokenData.holders_count} holders.\nNot listed on CoinMarketCap yet — that's fine. I can still track buys; USD price/market cap may show as N/A until a price feed is available.`,
-            );
-          }
-          if (dbTicker.value === null) {
-            const newTickerValue = await getTicker(dbTicker.conmarketcapId);
-            dbTicker.value = newTickerValue;
-            if (newTickerValue !== null) {
-              await tickerDao.updateTicker(dbTicker);
-            }
-          }
-          if (dbTicker.value === null) {
-            await ctx.reply(
-              `Got token ${tokenData.metadata.symbol} with ${tokenData.holders_count} holders.\nPrice feed isn't available yet — tracking buys with TON amounts only.`,
-            );
-          }
-          const fiatCurrency = getFiatCurrency();
-          const fiatFormat = new Intl.NumberFormat("en", {
-            style: "currency",
-            currency: fiatCurrency,
-          });
 
-          // If we have a fiat price, show it. Otherwise we've already warned above.
-          if (dbTicker.value !== null) {
-            await ctx.reply(
-              `Got token ${tokenData.metadata.symbol} with ${
-                tokenData.holders_count
-              } holders\nPrice is ${fiatFormat.format(
-                parseFloat(dbTicker.value),
-              )}`,
-            );
-          }
-        } catch (err) {
-          await ctx.reply("Unable to get token info");
-          return;
-        }
-      }
+    // Store token for this chat (we do NOT require CoinMarketCap listing)
+    await tickerDao.getOrCreateTicker(tokenAddress);
 
-      if (!config.value.emojiRequested) {
-        config.value.emojiRequested = true;
-        await configDao.updateConfig(config);
-        await ctx.reply("Please send me some emoji or 'no' to disable");
-        return;
-      }
-      if (config.value.emojiRequested && config.value.emoji === null) {
-        // @ts-expect-error message.text is string | undefined
-        if (ctx.message.text?.toLowerCase() === "no") {
-          config.value.emoji = false;
-          await ctx.reply("Okay, got it");
-          return;
-        }
-        // @ts-expect-error message.text is string | undefined
-        if (ctx.message.text?.length >= 1) {
-          // @ts-expect-error message.text is string | undefined
-          config.value.emoji = ctx.message?.text;
-          await ctx.reply("Okay, I'll use this emoji");
-        }
-      }
+    await ctx.reply(
+      `✅ Tracking ${tokenInfo.metadata.symbol} (${tokenInfo.holders_count} holders).
+` +
+        `Now watching buys on DEX and posting alerts.`
+    );
 
-      if (!config.value.gifRequested) {
-        config.value.gifRequested = true;
-        await configDao.updateConfig(config);
-        await ctx.reply(
-          "Please send me some animation or video or 'no' to disable",
-        );
-        return;
-      }
-      if (
-        config.value.gifRequested &&
-        config.value.gif === null &&
-        (config.value.photo ?? null) === null
-      ) {
-        // @ts-expect-error message.text is string | undefined
-        if (ctx.message.text?.toLowerCase() === "no") {
-          config.value.gif = false;
-          await ctx.reply("Okay, got it");
-          return;
-        }
-        if (
-          // @ts-expect-error message.animation is expected
-          !ctx.message.animation &&
-          // @ts-expect-error message.video is expected
-          !ctx.message.video &&
-          // @ts-expect-error message.photo is expected
-          !ctx.message.photo
-        ) {
-          await ctx.reply("Please send me an animation (video or gif)");
-          return;
-        }
 
-        // @ts-expect-error message.animation is expected
-        if (ctx.message.animation || ctx.message.video) {
-          config.value.gif =
-            // @ts-expect-error message.animation is expected
-            ctx.message.video?.file_id ?? ctx.message.animation?.file_id;
-          // @ts-expect-error message.photo is expected
-          await ctx.replyWithVideo(config.value.gif);
-          // @ts-expect-error message.photo is expected
-        } else if (ctx.message.photo) {
-          config.value.photo =
-            // @ts-expect-error message.photo is expected
-            ctx.message.photo[ctx.message.photo.length - 1]?.file_id;
-          await ctx.replyWithPhoto(config.value.photo as string);
-        }
-        await configDao.updateConfig(config);
-        await ctx.reply("Okay, I'll use this animation");
-      }
-
-      if (!config.value.minBuyRequested) {
-        config.value.minBuyRequested = true;
-        await configDao.updateConfig(config);
-        await ctx.reply(
-          "Please send me the minimum amount of tokens to care about or 'no' to notify about all purchases",
-        );
-        return;
-      }
-      if (config.value.minBuyRequested && config.value.minBuy === null) {
-        // @ts-expect-error message.text is string | undefined
-        if (ctx.message.text?.toLowerCase() === "no") {
-          config.value.minBuy = false;
-          await configDao.updateConfig(config);
-          await ctx.reply("Okay, got it");
-          return;
-        }
-        // @ts-expect-error message.text is string | undefined
-        if (Number.isNaN(parseInt(ctx.message.text))) {
-          await ctx.reply("Please send me a valid number");
-          return;
-        }
-        // @ts-expect-error message.text is string | undefined
-        if (ctx.message.text?.length >= 1) {
-          // @ts-expect-error message.text is string | undefined
-          config.value.minBuy = ctx.message.text.toString();
-          await configDao.updateConfig(config);
-          await ctx.reply("Okay, I'll use this amount");
-        }
-      }
-    } catch (err) {
-      logger.error(`Error while processing message: ${inspect(err)}`);
-      await ctx.reply("Something went wrong");
-    }
-  });
-  telegraf.launch();
-  logger.info("Bot started");
 }
