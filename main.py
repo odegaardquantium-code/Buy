@@ -669,34 +669,41 @@ def parse_memepad_input(text: str) -> Dict[str, Any]:
     return {"source": "unknown", "token_address": None, "blum_slug": None, "raw": t}
 
 # ===================== COMMAND TEXT PARSER (FIXES BLUM "NO RESPONSE") =====================
-def parse_addtoken_message_text(msg_text: str) -> Optional[Tuple[str, str, Optional[str]]]:
-    """
-    Robust parser for /addtoken when Telegram preview/newlines break context.args.
-    Returns (raw_input, symbol, telegram_link?)
+def parse_addtoken_message_text(msg_text: str) -> Optional[Tuple[str, Optional[str], Optional[str]]]:
+    """Robust parser for /addtoken.
+
+    Accepts:
+      /addtoken <JETTON_OR_LINK>
+      /addtoken <JETTON_OR_LINK> <SYMBOL>
+      /addtoken <JETTON_OR_LINK> <SYMBOL> <TELEGRAM_LINK>
+      /addtoken <JETTON_OR_LINK> <TELEGRAM_LINK>   (symbol auto)
+    Returns (raw_input, symbol_or_None, telegram_link_or_None).
     """
     if not msg_text:
         return None
     t = msg_text.strip()
 
-    # Remove leading command (/addtoken@botname also)
-    # Keep everything after first space or newline.
     m = re.match(r"^/addtoken(?:@\w+)?(?:\s+|\n+)(.+)$", t, flags=re.IGNORECASE | re.DOTALL)
     if not m:
         return None
     rest = m.group(1).strip()
-
-    # Normalize whitespace
     parts = re.split(r"\s+", rest)
     parts = [p for p in parts if p.strip()]
-
-    if len(parts) < 2:
+    if len(parts) < 1:
         return None
 
     raw_input = parts[0].strip()
-    symbol = parts[1].strip().upper()
+    symbol: Optional[str] = None
+    tg: Optional[str] = None
 
-    tg = parts[2].strip() if len(parts) >= 3 else None
-    tg = normalize_url(tg) if tg else None
+    if len(parts) == 2:
+        if parts[1].lower().startswith(("http://", "https://", "t.me/")):
+            tg = normalize_url(parts[1].strip())
+        else:
+            symbol = parts[1].strip().upper()
+    elif len(parts) >= 3:
+        symbol = parts[1].strip().upper()
+        tg = normalize_url(parts[2].strip())
 
     return raw_input, symbol, tg
 
@@ -1116,6 +1123,32 @@ def get_jetton_decimals(jetton_master: str) -> int:
     JETTON_DECIMALS_CACHE[jetton_master] = dec
     return dec
 
+
+
+def get_jetton_metadata(jetton_master: str) -> Dict[str, Any]:
+    """Fetch basic jetton metadata (name/symbol/image) via TonAPI."""
+    out: Dict[str, Any] = {"name": None, "symbol": None, "image": None}
+    if not jetton_master:
+        return out
+    try:
+        js = tonapi_get(f"{TONAPI_BASE.rstrip('/')}/v2/jettons/{jetton_master}")
+        if isinstance(js, dict):
+            md = js.get("metadata") if isinstance(js.get("metadata"), dict) else {}
+            sym = md.get("symbol") or md.get("ticker")
+            name = md.get("name") or md.get("title")
+            img = md.get("image") or md.get("icon") or md.get("image_url")
+            if isinstance(sym, str):
+                sym = sym.replace("$", "").strip()
+            if isinstance(name, str):
+                name = name.strip()
+            if isinstance(img, str):
+                img = img.strip()
+            out["symbol"] = sym or None
+            out["name"] = name or None
+            out["image"] = img or None
+    except:
+        pass
+    return out
 
 def dedust_fetch_trades(pool_addr: str, limit: int = 25, after_lt: int = 0) -> List[Dict[str, Any]]:
     """Fetch recent trades for a DeDust pool.
@@ -2080,6 +2113,14 @@ async def post_buy_message(
         if not cfg.get("token_address") or not cfg.get("symbol"):
             return
 
+        # Compute USD amount (for min buy filtering)
+        usd_amt = 0.0
+        try:
+            if ton_usd and ton_amt:
+                usd_amt = float(ton_amt) * float(ton_usd)
+        except:
+            usd_amt = 0.0
+
         # Enforce min buy (USD)
         try:
             min_buy_usd = float(cfg.get("min_buy_usd") or 0.0)
@@ -2111,7 +2152,7 @@ async def post_buy_message(
         mc_group = f"{mc_val_raw:,.0f}" if isinstance(mc_val_raw, (int, float)) and mc_val_raw > 0 else "—"
         liq_val_raw = stats.get("liquidity_usd")
         liq_group = f"{liq_val_raw:,.0f}" if isinstance(liq_val_raw, (int, float)) and liq_val_raw > 0 else "—"
-        usd_group = f"{usd_val:,.2f}" if usd_val else ""
+        usd_group = f"{usd_amt:,.2f}" if usd_amt else ""
         buyer_group = short(buyer)
         sym_g = html.escape(str(cfg.get("symbol") or sym))
 
@@ -2171,7 +2212,6 @@ async def post_buy_message(
             disable_web_page_preview=True,
         )
         sent_refs.append((chat_id, msg.message_id, False))
-
     # Send to master and mirrors
     for chat_id in targets:
         try:
@@ -2430,6 +2470,7 @@ async def memepad_activation_job(context: ContextTypes.DEFAULT_TYPE):
         DATA["pairs"][pair_id] = {
             "symbol": symbol or old.get("symbol", "?"),
             "token_address": token_address,
+        "token_name": token_name,
             "telegram": tg_link or old.get("telegram"),
             "dex": dex,
             "dex_label": dex_label or old.get("dex_label") or ("DeDust" if dex == "dedust" else "STON.fi"),
@@ -2628,6 +2669,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = ""
 
     if chat and chat.type == "private":
+        # Allow /start to work even if a wizard/edit was pending
+        if context.user_data.get("wizard") and not payload:
+            context.user_data.pop("wizard", None)
+            context.user_data.pop("pending_edit", None)
         # Deep link to configure a specific group
         if payload.startswith("cfg_"):
             try:
@@ -2775,6 +2820,7 @@ def _ensure_group_cfg(cid: int) -> Dict[str, Any]:
     # Defaults
     cfg.setdefault("symbol", None)
     cfg.setdefault("token_address", None)
+    cfg.setdefault("token_name", None)
     cfg.setdefault("pair_id", None)
     cfg.setdefault("dex", None)
     cfg.setdefault("telegram", None)
@@ -2807,50 +2853,23 @@ def _group_links_line(tg_url: Optional[str], chart_url: str) -> str:
     trending_part = f"<a href='{TRENDING_URL}'>Trending</a>"
     return f"Links: {tg_part} | {dexs_part} | {trending_part}"
 
-def _menu_edit_keyboard(page: int = 1, cfg: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
+def _menu_edit_keyboard(cfg: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
+    """Single-page edit menu (simple like Suite)."""
     cfg = cfg or {}
     buy_step = cfg.get("buy_step", 1.0)
-    min_buy = cfg.get("min_buy_usd", None)
-    if min_buy is None:
-        min_buy = 0.0
-    # back-compat: if only TON threshold was set, show approx USD using cached TON price
-    try:
-        if (not cfg.get("min_buy_usd")) and float(cfg.get("min_buy_ton") or 0.0) > 0:
-            tonp = float(STATE.get("ton_price_usd") or 0.0)
-            if tonp > 0:
-                min_buy = round(float(cfg.get("min_buy_ton") or 0.0) * tonp, 2)
-    except Exception:
-        pass
+    min_buy = cfg.get("min_buy_usd", 0.0) or 0.0
     emoji = cfg.get("emoji", "💡")
+    extra = cfg.get("custom_link") or ""
     has_media = "✅" if cfg.get("media_file_id") else "—"
 
-    # Page selector
-    header = [
-        InlineKeyboardButton("✅ Page 1" if page == 1 else "Page 1", callback_data="edit:page:1"),
-        InlineKeyboardButton("✅ Page 2" if page == 2 else "Page 2", callback_data="edit:page:2"),
-        InlineKeyboardButton("✅ Page 3" if page == 3 else "Page 3", callback_data="edit:page:3"),
+    rows: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("ℹ️ Buy Step", callback_data="noop"), InlineKeyboardButton(f"✏️ ({buy_step})", callback_data="edit:set:buy_step")],
+        [InlineKeyboardButton("ℹ️ Min Buy (USD)", callback_data="noop"), InlineKeyboardButton(f"✏️ ({min_buy})", callback_data="edit:set:min_buy_usd")],
+        [InlineKeyboardButton("ℹ️ Emoji", callback_data="noop"), InlineKeyboardButton(f"✏️ ({emoji})", callback_data="edit:set:emoji")],
+        [InlineKeyboardButton("ℹ️ Link", callback_data="noop"), InlineKeyboardButton("✏️" if not extra else "✏️ (set)", callback_data="edit:set:custom_link")],
+        [InlineKeyboardButton("ℹ️ Media", callback_data="noop"), InlineKeyboardButton(f"✏️ ({has_media})", callback_data="edit:set:media")],
+        [InlineKeyboardButton("🗑 Remove Media", callback_data="edit:clear:media"), InlineKeyboardButton("« Return", callback_data="edit:return")],
     ]
-
-    rows: List[List[InlineKeyboardButton]] = [header]
-
-    if page == 1:
-        rows += [
-            [InlineKeyboardButton("ℹ️ Buy Step", callback_data="noop"), InlineKeyboardButton(f"✏️ ({buy_step})", callback_data="edit:set:buy_step")],
-            [InlineKeyboardButton("ℹ️ Min Buy (USD)", callback_data="noop"), InlineKeyboardButton(f"✏️ ({min_buy})", callback_data="edit:set:min_buy_usd")],
-            [InlineKeyboardButton("ℹ️ Emoji", callback_data="noop"), InlineKeyboardButton(f"✏️ ({emoji})", callback_data="edit:set:emoji")],
-        ]
-    elif page == 2:
-        rows += [
-            [InlineKeyboardButton("ℹ️ Extra Link", callback_data="noop"), InlineKeyboardButton("✏️", callback_data="edit:set:custom_link")],
-            [InlineKeyboardButton("ℹ️ Media (logo/photo)", callback_data="noop"), InlineKeyboardButton(f"✏️ ({has_media})", callback_data="edit:set:media")],
-        ]
-    else:
-        rows += [
-            [InlineKeyboardButton("👁 Preview", callback_data="edit:preview"), InlineKeyboardButton("🧪 Test Buy", callback_data="edit:test")],
-            [InlineKeyboardButton("🗑 Remove Media", callback_data="edit:clear:media"), InlineKeyboardButton("⬅️ Return", callback_data="edit:return")],
-        ]
-
-    rows.append([InlineKeyboardButton("« Return", callback_data="edit:return")])
     return InlineKeyboardMarkup(rows)
 
 async def tokens_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2919,7 +2938,7 @@ async def edittoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg = _ensure_group_cfg(cid)
     await update.message.reply_text(
         "Customize your Token",
-        reply_markup=_menu_edit_keyboard(1, cfg),
+        reply_markup=_menu_edit_keyboard(cfg),
         disable_web_page_preview=True
     )
 
@@ -2934,7 +2953,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("menu:"):
         action = data.split(":", 1)[1]
         if action == "addtoken":
-            await q.message.reply_text("Send: /addtoken <JETTON_ADDRESS> <SYMBOL> [TELEGRAM_LINK]")
+            await q.message.reply_text("Send: /addtoken <JETTON_ADDRESS> [SYMBOL] [TELEGRAM_LINK]")
         elif action == "edit":
             # Open edit menu for selected group
             dummy_update = update
@@ -2945,7 +2964,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not await _require_group_admin(update, context, cid):
                 return
             cfg = _ensure_group_cfg(cid)
-            await q.message.reply_text("Customize your Token", reply_markup=_menu_edit_keyboard(1, cfg))
+            await q.message.reply_text("Customize your Token", reply_markup=_menu_edit_keyboard(cfg))
         elif action == "tokens":
             # Show token
             fake = update
@@ -2973,18 +2992,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Edit flow
-    if data.startswith("edit:page:"):
-        cid = _effective_group_id(update, context)
-        if not cid:
-            return
         if not await _require_group_admin(update, context, cid):
             return
         page = int(data.split(":")[-1])
         cfg = _ensure_group_cfg(cid)
         try:
-            await q.message.edit_reply_markup(reply_markup=_menu_edit_keyboard(page, cfg))
+            await q.message.edit_reply_markup(reply_markup=_menu_edit_keyboard(cfg))
         except Exception:
-            await q.message.reply_text("Customize your Token", reply_markup=_menu_edit_keyboard(page, cfg))
+            await q.message.reply_text("Customize your Token", reply_markup=_menu_edit_keyboard(cfg))
         return
 
     if data.startswith("edit:set:"):
@@ -3122,6 +3137,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     dex = "dedust" if pair_id else None
 
                 cfg["token_address"] = ca
+                cfg["token_name"] = (get_jetton_metadata(ca).get("name") or cfg.get("token_name"))
                 cfg["pair_id"] = pair_id
                 cfg["dex"] = dex
                 cfg["symbol"] = sym or cfg.get("symbol") or "TOKEN"
@@ -3209,7 +3225,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         return
 
                 context.user_data.pop("wizard", None)
-                await update.message.reply_text("✅ Setup complete! Use the menu below to edit anytime.", reply_markup=_menu_edit_keyboard(1, cfg))
+                await update.message.reply_text("✅ Setup complete! Use the menu below to edit anytime.", reply_markup=_menu_edit_keyboard(cfg))
                 return
 
         return
@@ -3482,14 +3498,31 @@ async def addtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # robust parse (fixes Blum link "no response" / args issues)
     parsed_msg = parse_addtoken_message_text(update.message.text or "")
     if not parsed_msg:
-        await update.message.reply_text("Usage: /addtoken <JETTON_ADDRESS_OR_MEMEPAD_LINK> <SYMBOL> [TELEGRAM_LINK]")
+        await update.message.reply_text("Usage: /addtoken <JETTON_ADDRESS_OR_MEMEPAD_LINK> [SYMBOL] [TELEGRAM_LINK]")
         return
 
     raw_input, symbol, tg_link = parsed_msg
+
+    # If symbol not provided (especially for memepad links), we'll auto-fill later when possible.
+    if symbol:
+        symbol = symbol.replace('$','').strip().upper()[:16]
+
     tg_link = normalize_url(tg_link) if tg_link else None
 
     parsed = parse_memepad_input(raw_input)
     token_address = parsed.get("token_address")
+    # Auto-detect symbol/name if missing
+    token_name = None
+    if token_address:
+        md = get_jetton_metadata(token_address)
+        token_name = md.get("name")
+        if not symbol:
+            sym_auto = md.get("symbol")
+            if isinstance(sym_auto, str) and sym_auto.strip():
+                symbol = sym_auto.strip().upper().replace("$","")[:16]
+    if not symbol:
+        symbol = "TOKEN"
+
     source = parsed.get("source", "unknown")
     blum_slug = parsed.get("blum_slug")
 
@@ -3501,6 +3534,8 @@ async def addtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if (chat and chat.type in ("group", "supergroup")) or (chat and chat.type=="private" and target_gid):
             await update.message.reply_text("❌ For groups, please use the Jetton master address.\nUsage: /addtoken <JETTON_ADDRESS> <SYMBOL> [TELEGRAM_LINK]")
             return
+        if not symbol:
+            symbol = "TOKEN"
         watch_id = f"{source}:{blum_slug or raw_input}"
         DATA.setdefault("watch", {})
         DATA["watch"][watch_id] = {
@@ -3568,6 +3603,7 @@ async def addtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cfg = _ensure_group_cfg(gid)
             cfg["symbol"] = symbol
             cfg["token_address"] = token_address
+            cfg["token_name"] = token_name or cfg.get("token_name")
             cfg["pair_id"] = None
             cfg["dex"] = None
             cfg["telegram"] = tg_link
@@ -3626,6 +3662,7 @@ async def addtoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cfg = _ensure_group_cfg(gid)
         cfg["symbol"] = symbol
         cfg["token_address"] = token_address
+        cfg["token_name"] = token_name or cfg.get("token_name")
         cfg["pair_id"] = pair_id
         cfg["dex"] = dex
         cfg["telegram"] = tg_link
@@ -4180,7 +4217,7 @@ def main():
             bot.add_handler(CommandHandler("edittoken", edittoken))
 
             bot.add_handler(CallbackQueryHandler(on_callback))
-            bot.add_handler(MessageHandler(filters.PHOTO | filters.TEXT, on_message))
+            bot.add_handler(MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), on_message))
             bot.add_handler(CommandHandler("setrank", setrank))
             bot.add_handler(CommandHandler("clearrank", clearrank))
             bot.add_handler(CommandHandler("ranks", ranks))
