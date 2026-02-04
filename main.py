@@ -4105,10 +4105,14 @@ async def dedust_tracker_job(context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("Missing BOT_TOKEN")
+
+    # CHANNEL_ID and ADMIN_ID are optional for the multi-group setup:
+    # - If CHANNEL_ID is 0, the bot will only work in groups (no master channel posting).
+    # - If ADMIN_ID is 0, super-admin-only commands are disabled, but group-admin flows still work.
     if CHANNEL_ID == 0:
-        raise RuntimeError("Missing CHANNEL_ID")
+        log.warning("CHANNEL_ID not set (0). Bot will operate in groups only (no master channel posting).")
     if ADMIN_ID == 0:
-        raise RuntimeError("Missing ADMIN_ID")
+        log.warning("ADMIN_ID not set (0). Super-admin-only commands are disabled.")
 
     # Start web server once (for UptimeRobot / Replit public URL)
     global _WEB_STARTED
